@@ -10,6 +10,11 @@ import ddddocr
 import pymysql
 from selenium import webdriver
 import random
+import time
+import cv2
+
+config = json.load(open('config.json', 'r', encoding='utf-8'))
+ticket = config['ticket']
 
 
 class BuyTicket:
@@ -34,14 +39,13 @@ class BuyTicket:
         self.login_url = 'http://i.hzmbus.com/webh5api/login'  # 登录地址
         self.query_ticket_url = 'http://i.hzmbus.com/webh5api/manage/query.book.info.data'  # 车票查询地址
         # Email Setting begin
-        self.from_addr = 'email_address'
-        self.password = 'email_password'
-        self.to_addr = 'email_to_address'
-        self.smtp_server = 'smtp_server_address'
+        self.from_addr = config["email"]["from"]["address"]
+        self.password = config["email"]["from"]["password"]
+        self.to_addr = config["email"]["to"]
+        self.smtp_server = config["email"]["from"]["smtp"]
         # EMail Setting end
         # DB Setting begin
-        self.db = pymysql.connect(host='bj-cynosdbmysql-grp-1wd2xs2k.sql.tencentcdb.com', port=23776, user='hzm_bus_demo',
-                                  password='Hzm_bus_demo@', charset='utf8mb4', database='hzm_bus_demo')
+        self.db = pymysql.connect(**config["mysql"])
         self.cursor = self.db.cursor()
         # DB Setting end
         self.mac = uuid.UUID(int=uuid.getnode()).hex[-12:]
@@ -129,7 +133,7 @@ class BuyTicket:
         """
         while True:
             try:
-                max_people_data = {"bookDate": str(cdate), "lineCode": "HKGZHO",
+                max_people_data = {"bookDate": str(cdate), "lineCode": f"{ticket['from']}{ticket['to']}",
                                    "appId": "HZMBWEB_HK", "joinType": "WEB",
                                    "version": "2.7.202207.1213", "equipment": "PC"}
                 book_info = self.session.post(self.query_ticket_url,
@@ -234,6 +238,10 @@ class BuyTicket:
             a = self.session.get(buy_url, headers=headers)
             ocr = ddddocr.DdddOcr()
             code = ocr.classification(a.content)
+            with open('captcha.jpg', 'wb') as f:
+                f.write(a.content)
+                print(code)
+                cv2.imshow('captcha', cv2.imread('captcha.jpg'))
             try:
                 if len(code) != 4:
                     continue
@@ -242,9 +250,9 @@ class BuyTicket:
             except:
                 continue
         logging.info(code)
-        buy_data = {"ticketData": begin_date, "lineCode": "HKGZHO", "startStationCode": "HKG",
-                    "endStationCode": "ZHO",
-                    "boardingPointCode": "HKG01", "breakoutPointCode": "ZHO01", "currency": "2", "ticketCategory": "1",
+        buy_data = {"ticketData": begin_date, "lineCode": f'{ticket["from"]}{ticket["to"]}', "startStationCode": ticket["from"],
+                    "endStationCode": ticket["to"],
+                    "boardingPointCode": f"{ticket['from']}01", "breakoutPointCode": f"{ticket['to']}01", "currency": "2", "ticketCategory": "1",
                     "tickets": self.person_info,
                     "amount": 6500 * len(self.person_info), "feeType": 9, "totalVoucherpay": 0, "voucherNum": 0,
                     "voucherStr": "", "totalBalpay": 0,
@@ -252,8 +260,8 @@ class BuyTicket:
                     "bookEndTime": begin_time,
                     "captcha": code,
                     "sessionId": "", "sig": "", "token": "",
-                    "timestamp": 1660551038, "appId": "HZMBWEB_HK",
-                    "joinType": "WEB", "version": "2.7.202207.1213", "equipment": "PC"}
+                    "timestamp": int(time.time()), "appId": "HZMBWEB_HK",
+                    "joinType": "WEB", "version": "2.7.2032.1262", "equipment": "PC"}
         headers = {'Accept': 'application/json, text/plain, */*',
                    'Accept-Encoding': 'gzip, deflate, br',
                    'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
@@ -340,3 +348,4 @@ class BuyTicket:
 
 if __name__ == '__main__':
     BuyTicket().run()
+
