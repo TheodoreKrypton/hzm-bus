@@ -257,17 +257,20 @@ def buy_ticket(session, account, headers, body):
     retry = 0
     while retry < MAX_RETRY:
         body["timestamp"] = int(time.time())
-        rsp = session.post(f'{BASE_URL}/ticket/buy.ticket', headers=headers, data=json.dumps(body)).json()
-        logging.info(rsp)
-        if rsp['code'] == 'SUCCESS':
-            send_email(account.username)
-            logging.info(f"已成功购买 for account: {account.username}")
-            return True
-        elif rsp['code'] == 'FAIL':
-            if rsp['message'] == '您還有未支付的訂單,請先支付后再進行購票,謝謝!':
+        try:
+            rsp = session.post(f'{BASE_URL}/ticket/buy.ticket', headers=headers, data=json.dumps(body)).json()
+            logging.info(rsp)
+            if rsp['code'] == 'SUCCESS':
                 send_email(account.username)
+                logging.info(f"已成功购买 for account: {account.username}")
                 return True
-            return False
+            elif rsp['code'] == 'FAIL':
+                if rsp['message'] == '您還有未支付的訂單,請先支付后再進行購票,謝謝!':
+                    send_email(account.username)
+                    return True
+                return False
+        except Exception as ex:
+            logging.error(f"buy_ticket error: {fmt_ex(ex)}")
         retry += 1
         body["captcha"] = solve_captcha(session, headers)
 
@@ -306,20 +309,25 @@ class Worker(threading.Thread):
 
         self.threads = []
         for job in jobs:
-            session = requests.session()
+            while True:
+                try:
+                    session = requests.session()
 
-            headers = HEADERS.copy()
-            headers['Cookie'] = get_cookies()
-            headers.update({
-                'Authorization': login(session, headers, account),
-                'Referer': get_referrer()
-            })
-            thread = threading.Thread(
-                target=self.run_task,
-                args=(session, account, headers, create_body(session, headers, *job))
-            )
-            logging.info(f"worker {account.username} started for {' '.join(job)}")
-            self.threads.append(thread)
+                    headers = HEADERS.copy()
+                    headers['Cookie'] = get_cookies()
+                    headers.update({
+                        'Authorization': login(session, headers, account),
+                        'Referer': get_referrer()
+                    })
+                    thread = threading.Thread(
+                        target=self.run_task,
+                        args=(session, account, headers, create_body(session, headers, *job))
+                    )
+                    logging.info(f"worker {account.username} started for {' '.join(job)}")
+                    self.threads.append(thread)
+                    break
+                except Exception as ex:
+                    logging.error(f"creating worker {account.username} for {' '.join(job)} error: {fmt_ex(ex)}")
 
     @staticmethod
     def run_task(session, account, headers, body):
