@@ -29,9 +29,12 @@ class Passenger:
 
 
 config = json.load(open('config.json', 'r', encoding='utf-8'))
-from_station = config["ticket"]["from"]
-to_station = config["ticket"]["to"]
-base_url = 'http://i.hzmbus.com/webh5api'
+FROM_STATION = config["ticket"]["from"]
+TO_STATION = config["ticket"]["to"]
+BEGIN_TIME = config["behaviour"]["begin_time"]
+TASKS_PER_ACCOUNT = config["behaviour"]["tasks_per_account"]
+MAX_RETRY = config["behaviour"]["max_retry"]
+BASE_URL = 'http://i.hzmbus.com/webh5api'
 HEADERS = {
     'Accept': 'application/json, text/plain, */*',
     'Accept-Encoding': 'gzip, deflate, br',
@@ -48,7 +51,6 @@ HEADERS = {
     'sec-ch-ua-platform': '"Windows"',
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
 }
-ocr = ddddocr.DdddOcr()
 BUS_SCHEDULES = {
     "HKGZHO": [
         "11:00:00",
@@ -68,9 +70,12 @@ BUS_SCHEDULES = {
         "17:00:00",
     ]
 }
-TASKS_PER_ACCOUNT = 3
-MAX_RETRY = 10
-IMMEDIATE = True
+
+ocr = ddddocr.DdddOcr()
+
+
+def fmt_ex(ex):
+    return f"{type(ex)}: {ex}"
 
 
 @lru_cache(1)
@@ -150,17 +155,17 @@ code = {
 @lru_cache(1)
 def get_referrer():
     params = urllib.parse.urlencode({
-        "xlmc_1": from_station,
-        "xlmc_2": to_station,
+        "xlmc_1": FROM_STATION,
+        "xlmc_2": TO_STATION,
         "xllb": 1,
-        "xldm": f"{from_station}{to_station}",
-        "code_1": from_station,
-        "code_2": to_station
+        "xldm": f"{FROM_STATION}{TO_STATION}",
+        "code_1": FROM_STATION,
+        "code_2": TO_STATION
     })
     return f"https://i.hzmbus.com/webhtml/ticket_details?{params}"
 
 
-def set_cookies():
+def get_cookies():
     options = webdriver.ChromeOptions()
     options.add_experimental_option('excludeSwitches', ['enable-automation'])
     options.add_experimental_option('useAutomationExtension', False)
@@ -171,18 +176,20 @@ def set_cookies():
     driver = webdriver.Chrome(options=options)
     driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument',
                            {'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'})
-    driver.get(f"{base_url}/login")
+    driver.get(f"{BASE_URL}/login")
 
     while True:
-        cookies = driver.get_cookies()
-        if 'PHPSESSID' in str(cookies):
-            cookies = ';'.join((f"{cookie['name']}={cookie['value']}" for cookie in cookies))
-            HEADERS['Cookie'] = cookies
-            break
-    driver.close()
+        try:
+            cookies = driver.get_cookies()
+            if 'PHPSESSID' in str(cookies):
+                cookies = ';'.join((f"{cookie['name']}={cookie['value']}" for cookie in cookies))
+                driver.close()
+                return cookies
+        except Exception as ex:
+            logging.error(f"get_cookies error: {fmt_ex(ex)}")
 
 
-def login(session, account):
+def login(session, headers, account):
     user = with_base_body({
         "webUserid": account.username,
         "passWord": account.password,
@@ -191,13 +198,16 @@ def login(session, account):
 
     while True:
         try:
-            rsp = session.post(url=f"{base_url}/login", data=json.dumps(user), headers=HEADERS, verify=False)
-            data = rsp.json()
-            if data['code'] == 'SUCCESS':
-                logging.info('登录成功 ' + account.username)
-                return data["jwt"]
+            rsp = session.post(url=f"{BASE_URL}/login", data=json.dumps(user), headers=headers, verify=False)
+            try:
+                data = rsp.json()
+                if data['code'] == 'SUCCESS':
+                    logging.info('登录成功 ' + account.username)
+                    return data["jwt"]
+            except json.JSONDecodeError:
+                continue
         except Exception as ex:
-            logging.error(ex)
+            logging.error(f"login error: {fmt_ex(ex)}")
 
 
 @lru_cache(1)
@@ -227,27 +237,27 @@ def get_passenger_info():
     }] * len(passengers)
 
 
-def solve_captcha(session):
+def solve_captcha(session, headers):
     while True:
-        captcha = session.get(f"{base_url}/captcha?1", headers=HEADERS)
-        res = ocr.classification(captcha.content)
-        with open("captcha.jpg", "wb") as fp:
-            fp.write(captcha.content)
-        if len(res) != 4:
-            continue
         try:
-            int(res)
-            return res
-        except ValueError:
-            continue
+            captcha = session.get(f"{BASE_URL}/captcha?1", headers=headers)
+            res = ocr.classification(captcha.content)
+            if len(res) != 4:
+                continue
+            try:
+                int(res)
+                return res
+            except ValueError:
+                continue
+        except Exception as ex:
+            logging.error(f"solve_captcha error: {fmt_ex(ex)}")
 
 
 def buy_ticket(session, account, headers, body):
-    body["timestamp"] = int(time.time())
     retry = 0
     while retry < MAX_RETRY:
-        body["captcha"] = solve_captcha(session)
-        rsp = session.post(f'{base_url}/ticket/buy.ticket', headers=headers, data=json.dumps(body)).json()
+        body["timestamp"] = int(time.time())
+        rsp = session.post(f'{BASE_URL}/ticket/buy.ticket', headers=headers, data=json.dumps(body)).json()
         logging.info(rsp)
         if rsp['code'] == 'SUCCESS':
             send_email(account.username)
@@ -259,27 +269,23 @@ def buy_ticket(session, account, headers, body):
                 return True
             return False
         retry += 1
+        body["captcha"] = solve_captcha(session, headers)
 
 
 class Worker(threading.Thread):
     def __init__(self, account, jobs):
         super().__init__()
-        self.session = requests.session()
         self.jobs = jobs
-        self.jwt = login(self.session, account)
-        self.headers = HEADERS.copy()
-        self.headers['Authorization'] = self.jwt
-        self.headers['Referer'] = get_referrer()
 
-        def create_body(date, _time):
+        def create_body(_session, _headers, date, _time):
             passenger_info = get_passenger_info()
             return with_base_body({
                 "ticketData": date,
-                "lineCode": f'{from_station}{to_station}',
-                "startStationCode": from_station,
-                "endStationCode": to_station,
-                "boardingPointCode": f"{from_station}01",
-                "breakoutPointCode": f"{to_station}01",
+                "lineCode": f'{FROM_STATION}{TO_STATION}',
+                "startStationCode": FROM_STATION,
+                "endStationCode": TO_STATION,
+                "boardingPointCode": f"{FROM_STATION}01",
+                "breakoutPointCode": f"{TO_STATION}01",
                 "currency": "2",
                 "ticketCategory": "1",
                 "tickets": passenger_info,
@@ -295,32 +301,46 @@ class Worker(threading.Thread):
                 "sessionId": "",
                 "sig": "",
                 "token": "",
+                "captcha": solve_captcha(_session, _headers)
             })
 
-        self.threads = [threading.Thread(
-            target=buy_ticket,
-            args=(self.session, account, self.headers, create_body(*job))
-        ) for job in jobs]
+        self.threads = []
+        for job in jobs:
+            session = requests.session()
+
+            headers = HEADERS.copy()
+            headers['Cookie'] = get_cookies()
+            headers.update({
+                'Authorization': login(session, headers, account),
+                'Referer': get_referrer()
+            })
+            thread = threading.Thread(
+                target=self.run_task,
+                args=(session, job, headers, create_body(session, headers, *job))
+            )
+            logging.info(f"worker {account.username} started for {' '.join(job)}")
+            self.threads.append(thread)
+
+    @staticmethod
+    def run_task(session, job, headers, body):
+        while True:
+            if BEGIN_TIME is None or time.time() > BEGIN_TIME:
+                buy_ticket(session, job, headers, body)
+                break
 
     def run(self) -> None:
-        while True:
-            t = time.localtime()
-            if IMMEDIATE or (t.tm_hour == 19 and t.tm_min == 59 and t.tm_sec == 59):
-                for thread in self.threads:
-                    thread.start()
+        for thread in self.threads:
+            thread.start()
 
-                for thread in self.threads:
-                    thread.join()
-
-                break
+        for thread in self.threads:
+            thread.join()
 
 
 def run():
     initialize_logger()
-    set_cookies()
-    # date_range = get_date_range()
-    date_range = ["2022-12-08", "2022-12-07"]
-    route = f"{from_station}{to_station}"
+    date_range = get_date_range()
+    # date_range = ["2022-12-08", "2022-12-07"]
+    route = f"{FROM_STATION}{TO_STATION}"
     schedules = BUS_SCHEDULES[route]
 
     buffer = []

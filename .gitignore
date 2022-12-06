@@ -4,3 +4,4 @@ config.json
 scratch
 accounts.txt
 *.log
+*.exe

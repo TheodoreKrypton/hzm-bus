@@ -2,3 +2,4 @@ selenium<4.3.0
 requests
 ddddocr
 pymysql
+aiohttp
