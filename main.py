@@ -110,7 +110,7 @@ def with_base_body(addition):
     base_body = {
         "appId": "HZMBWEB_HK",
         "joinType": "WEB",
-        "version": "2.7.202207.1213",
+        "version": "2.7.2032.1262",
         "equipment": "PC"
     }
     base_body.update(addition)
@@ -316,16 +316,16 @@ class Worker(threading.Thread):
             })
             thread = threading.Thread(
                 target=self.run_task,
-                args=(session, job, headers, create_body(session, headers, *job))
+                args=(session, account, headers, create_body(session, headers, *job))
             )
             logging.info(f"worker {account.username} started for {' '.join(job)}")
             self.threads.append(thread)
 
     @staticmethod
-    def run_task(session, job, headers, body):
+    def run_task(session, account, headers, body):
         while True:
             if BEGIN_TIME is None or time.time() > BEGIN_TIME:
-                buy_ticket(session, job, headers, body)
+                buy_ticket(session, account, headers, body)
                 break
 
     def run(self) -> None:
