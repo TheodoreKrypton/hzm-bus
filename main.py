@@ -32,7 +32,6 @@ class Passenger:
 config = json.load(open('config.json', 'r', encoding='utf-8'))
 from_station = config["ticket"]["from"]
 to_station = config["ticket"]["to"]
-current_account = None  # type: Optional[Account]
 base_url = 'http://i.hzmbus.com/webh5api'
 HEADERS = {
     'Accept': 'application/json, text/plain, */*',
@@ -72,6 +71,7 @@ BUS_SCHEDULES = {
 }
 TASKS_PER_ACCOUNT = 3
 MAX_RETRY = 10
+IMMEDIATE = True
 
 
 @lru_cache(1)
@@ -86,18 +86,12 @@ def query(sql):
 
 
 def get_accounts():
-    global current_account
-
     with open("accounts.txt", encoding='utf-8') as fp:
         all_accounts = [line.split() for line in fp.read().split('\n')]
-    i = 0
-    while True:
-        i %= len(all_accounts)
-        username, password, active = all_accounts[i]
-        i += 1
+    for account in all_accounts:
+        username, password, active = account
         if bool(int(active)):
-            current_account = Account(username=username, password=password)
-            yield current_account
+            yield Account(username=username, password=password)
 
 
 accounts = get_accounts()
@@ -129,8 +123,8 @@ def initialize_logger():
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
 
 
-def send_email():
-    msg = MIMEText(f'请尽快上号支付 {current_account.username}', 'plain', 'utf-8')
+def send_email(username):
+    msg = MIMEText(f'请尽快上号支付 {username}', 'plain', 'utf-8')
     msg['From'] = Header(config["email"]["from"]["address"])
     msg['To'] = Header(config["email"]["to"])
     subject = '中了'
@@ -201,7 +195,7 @@ def login(session, account):
             rsp = session.post(url=f"{base_url}/login", data=json.dumps(user), headers=HEADERS, verify=False)
             data = rsp.json()
             if data['code'] == 'SUCCESS':
-                logging.info('登录成功 ' + str(current_account.username))
+                logging.info('登录成功 ' + account.username)
                 return data["jwt"]
         except Exception as ex:
             logging.error(ex)
@@ -249,7 +243,7 @@ def solve_captcha(session):
             continue
 
 
-def buy_ticket(session, headers, body):
+def buy_ticket(session, account, headers, body):
     body["timestamp"] = int(time.time())
     retry = 0
     while retry < MAX_RETRY:
@@ -257,12 +251,12 @@ def buy_ticket(session, headers, body):
         rsp = session.post(f'{base_url}/ticket/buy.ticket', headers=headers, data=json.dumps(body)).json()
         logging.info(rsp)
         if rsp['code'] == 'SUCCESS':
-            send_email()
-            logging.info(f"已成功购买 for account: {current_account.username}")
+            send_email(account.username)
+            logging.info(f"已成功购买 for account: {account.username}")
             return True
         elif rsp['code'] == 'FAIL':
             if rsp['message'] == '您還有未支付的訂單,請先支付后再進行購票,謝謝!':
-                send_email()
+                send_email(account.username)
                 return True
             return False
         retry += 1
@@ -274,9 +268,9 @@ class Worker(threading.Thread):
         self.session = requests.session()
         self.jobs = jobs
         self.jwt = login(self.session, account)
-        self.header = HEADERS.copy()
-        self.header['Authorization'] = self.jwt
-        self.header['Referer'] = get_referrer()
+        self.headers = HEADERS.copy()
+        self.headers['Authorization'] = self.jwt
+        self.headers['Referer'] = get_referrer()
 
         def create_body(date, _time):
             passenger_info = get_passenger_info()
@@ -304,38 +298,48 @@ class Worker(threading.Thread):
                 "token": "",
             })
 
-        self.threads = [threading.Thread(target=buy_ticket, args=create_body(*job)) for job in jobs]
+        self.threads = [threading.Thread(
+            target=buy_ticket,
+            args=(self.session, account, self.headers, create_body(*job))
+        ) for job in jobs]
 
     def run(self) -> None:
         while True:
-            if time.localtime().tm_hour == 20:
+            t = time.localtime()
+            if IMMEDIATE or (t.tm_hour == 19 and t.tm_min == 59 and t.tm_sec == 59):
                 for thread in self.threads:
                     thread.start()
 
                 for thread in self.threads:
                     thread.join()
 
+                break
+
 
 def run():
     initialize_logger()
     set_cookies()
-    date_range = get_date_range()
+    # date_range = get_date_range()
+    date_range = ["2022-12-08", "2022-12-07"]
     route = f"{from_station}{to_station}"
     schedules = BUS_SCHEDULES[route]
 
     buffer = []
     threads = []
 
-    for date in date_range:
-        for slot in schedules:
-            buffer.append((date, slot))
-            if len(buffer) == TASKS_PER_ACCOUNT:
-                account = next(accounts)
-                threads.append(Worker(account, buffer))
-                buffer = []
+    try:
+        for date in date_range:
+            for slot in schedules:
+                buffer.append((date, slot))
+                if len(buffer) == TASKS_PER_ACCOUNT:
+                    account = next(accounts)
+                    threads.append(Worker(account, buffer))
+                    buffer = []
 
-    account = next(accounts)
-    threads.append(Worker(account, buffer))
+        account = next(accounts)
+        threads.append(Worker(account, buffer))
+    except StopIteration:
+        pass
 
     for thread in threads:
         thread.start()
