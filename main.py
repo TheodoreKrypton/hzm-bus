@@ -11,7 +11,6 @@ import logging
 from dataclasses import dataclass
 import datetime
 import ddddocr
-from typing import Optional
 import sys
 import time
 import threading
