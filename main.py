@@ -14,6 +14,7 @@ import ddddocr
 from typing import Optional
 import sys
 import time
+import threading
 
 
 @dataclass
@@ -31,7 +32,6 @@ class Passenger:
 config = json.load(open('config.json', 'r', encoding='utf-8'))
 from_station = config["ticket"]["from"]
 to_station = config["ticket"]["to"]
-session = requests.session()
 current_account = None  # type: Optional[Account]
 base_url = 'http://i.hzmbus.com/webh5api'
 HEADERS = {
@@ -51,6 +51,27 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
 }
 ocr = ddddocr.DdddOcr()
+BUS_SCHEDULES = {
+    "HKGZHO": [
+        "11:00:00",
+        "12:00:00",
+        "13:00:00",
+        "14:00:00",
+        "15:00:00",
+        "16:00:00",
+        "17:00:00",
+        "18:00:00",
+    ],
+    "ZHOHKG": [
+        "11:00:00",
+        "13:00:00",
+        "15:00:00",
+        "16:00:00",
+        "17:00:00",
+    ]
+}
+TASKS_PER_ACCOUNT = 3
+MAX_RETRY = 10
 
 
 @lru_cache(1)
@@ -133,7 +154,7 @@ code = {
 }
 
 
-@lru_cache(0)
+@lru_cache(1)
 def get_referrer():
     params = urllib.parse.urlencode({
         "xlmc_1": from_station,
@@ -168,9 +189,7 @@ def set_cookies():
     driver.close()
 
 
-def switch_account():
-    logging.info("switching account")
-    account = next(accounts)
+def login(session, account):
     user = with_base_body({
         "webUserid": account.username,
         "passWord": account.password,
@@ -183,49 +202,16 @@ def switch_account():
             data = rsp.json()
             if data['code'] == 'SUCCESS':
                 logging.info('登录成功 ' + str(current_account.username))
-                HEADERS['Authorization'] = data["jwt"]
-                return
+                return data["jwt"]
         except Exception as ex:
             logging.error(ex)
 
 
-def get_ticket_info(date):
-    while True:
-        try:
-            body = with_base_body({
-                "bookDate": str(date),
-                "lineCode": f"{from_station}{to_station}"
-            })
-            book_info = session.post(f'{base_url}/manage/query.book.info.data', data=json.dumps(body), headers=HEADERS)
-            if book_info.json()['code'] != 'SUCCESS':
-                logging.error(book_info.json()['message'])
-                switch_account()
-                continue
-            return book_info.json()['responseData']
-        except Exception as error:
-            logging.error(f'访问异常, {error}')
-            set_cookies()
-            switch_account()
-            continue
-
-
+@lru_cache(1)
 def get_date_range():
-    begin_date = datetime.datetime.now().date()
-    while True:
-        rsp = get_ticket_info(begin_date)
-        if not rsp:
-            switch_account()
-        else:
-            end_date = rsp[0]['maxBookDate']
-            break
-    date_range = []
-    while True:
-        date_range.append(str(begin_date))
-        begin_date += datetime.timedelta(days=1)
-        if str(begin_date) == end_date:
-            date_range.append(end_date)
-            break
-    return date_range
+    begin_date = datetime.datetime.today().date()
+    next_monday = begin_date + datetime.timedelta(days=(7 - begin_date.weekday()))
+    return list(map(str, reversed([next_monday + datetime.timedelta(days=i) for i in range(0, 7)])))
 
 
 @lru_cache(1)
@@ -248,28 +234,7 @@ def get_passenger_info():
     }] * len(passengers)
 
 
-def ticket_query(date_range):
-    for date in date_range:
-        logging.info(f'当前查询日期[{date}]')
-        get_book_info = get_ticket_info(date)
-        if not get_book_info:
-            switch_account()
-            continue
-        seats_available = 0
-        passengers = get_passengers()
-        for item in get_book_info:
-            try:
-                seats_available += int(item["maxPeople"])
-                if seats_available >= len(passengers):
-                    logging.info(f'时间: {date} {item["beginTime"]}, 票数: {seats_available}, '
-                                 f'状态: {"不能购买" if seats_available <= len(passengers) else "正在购买"}')
-                    return buy_ticket(date, item["beginTime"])
-            except:
-                logging.error('当日无车票信息')
-        logging.info(f'时间: {date}, 票数: {seats_available}, 状态: {"不能购买" if seats_available == 0 else "可以购买"}')
-
-
-def solve_captcha():
+def solve_captcha(session):
     while True:
         captcha = session.get(f"{base_url}/captcha?1", headers=HEADERS)
         res = ocr.classification(captcha.content)
@@ -284,38 +249,12 @@ def solve_captcha():
             continue
 
 
-def buy_ticket(date, _time):
-    passenger_info = get_passenger_info()
-    body = with_base_body({
-        "ticketData": date,
-        "lineCode": f'{from_station}{to_station}',
-        "startStationCode": from_station,
-        "endStationCode": to_station,
-        "boardingPointCode": f"{from_station}01",
-        "breakoutPointCode": f"{to_station}01",
-        "currency": "2",
-        "ticketCategory": "1",
-        "tickets": passenger_info,
-        "amount": 6500 * len(passenger_info),
-        "feeType": 9,
-        "totalVoucherpay": 0,
-        "voucherNum": 0,
-        "voucherStr": "",
-        "totalBalpay": 0,
-        "totalNeedpay": 6500 * len(passenger_info),
-        "bookBeginTime": _time,
-        "bookEndTime": _time,
-        "captcha": solve_captcha(),
-        "sessionId": "",
-        "sig": "",
-        "token": "",
-        "timestamp": int(time.time())
-    })
-    new_headers = HEADERS.copy()
-    new_headers['Referer'] = get_referrer()
-
-    while True:
-        rsp = session.post(f'{base_url}/ticket/buy.ticket', headers=HEADERS, data=json.dumps(body)).json()
+def buy_ticket(session, headers, body):
+    body["timestamp"] = int(time.time())
+    retry = 0
+    while retry < MAX_RETRY:
+        body["captcha"] = solve_captcha(session)
+        rsp = session.post(f'{base_url}/ticket/buy.ticket', headers=headers, data=json.dumps(body)).json()
         logging.info(rsp)
         if rsp['code'] == 'SUCCESS':
             send_email()
@@ -326,19 +265,83 @@ def buy_ticket(date, _time):
                 send_email()
                 return True
             return False
-        else:
-            switch_account()
+        retry += 1
+
+
+class Worker(threading.Thread):
+    def __init__(self, account, jobs):
+        super().__init__()
+        self.session = requests.session()
+        self.jobs = jobs
+        self.jwt = login(self.session, account)
+        self.header = HEADERS.copy()
+        self.header['Authorization'] = self.jwt
+        self.header['Referer'] = get_referrer()
+
+        def create_body(date, _time):
+            passenger_info = get_passenger_info()
+            return with_base_body({
+                "ticketData": date,
+                "lineCode": f'{from_station}{to_station}',
+                "startStationCode": from_station,
+                "endStationCode": to_station,
+                "boardingPointCode": f"{from_station}01",
+                "breakoutPointCode": f"{to_station}01",
+                "currency": "2",
+                "ticketCategory": "1",
+                "tickets": passenger_info,
+                "amount": 6500 * len(passenger_info),
+                "feeType": 9,
+                "totalVoucherpay": 0,
+                "voucherNum": 0,
+                "voucherStr": "",
+                "totalBalpay": 0,
+                "totalNeedpay": 6500 * len(passenger_info),
+                "bookBeginTime": _time,
+                "bookEndTime": _time,
+                "sessionId": "",
+                "sig": "",
+                "token": "",
+            })
+
+        self.threads = [threading.Thread(target=buy_ticket, args=create_body(*job)) for job in jobs]
+
+    def run(self) -> None:
+        while True:
+            if time.localtime().tm_hour == 20:
+                for thread in self.threads:
+                    thread.start()
+
+                for thread in self.threads:
+                    thread.join()
 
 
 def run():
     initialize_logger()
     set_cookies()
-    switch_account()
     date_range = get_date_range()
-    while True:
-        if ticket_query(date_range):
-            break
-        switch_account()
+    route = f"{from_station}{to_station}"
+    schedules = BUS_SCHEDULES[route]
+
+    buffer = []
+    threads = []
+
+    for date in date_range:
+        for slot in schedules:
+            buffer.append((date, slot))
+            if len(buffer) == TASKS_PER_ACCOUNT:
+                account = next(accounts)
+                threads.append(Worker(account, buffer))
+                buffer = []
+
+    account = next(accounts)
+    threads.append(Worker(account, buffer))
+
+    for thread in threads:
+        thread.start()
+
+    for thread in threads:
+        thread.join()
 
 
 run()
