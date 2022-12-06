@@ -199,13 +199,10 @@ def login(session, headers, account):
     while True:
         try:
             rsp = session.post(url=f"{BASE_URL}/login", data=json.dumps(user), headers=headers, verify=False)
-            try:
-                data = rsp.json()
-                if data['code'] == 'SUCCESS':
-                    logging.info('登录成功 ' + account.username)
-                    return data["jwt"]
-            except json.JSONDecodeError:
-                continue
+            data = rsp.json()
+            if data['code'] == 'SUCCESS':
+                logging.info('登录成功 ' + account.username)
+                return data["jwt"]
         except Exception as ex:
             logging.error(f"login error: {fmt_ex(ex)}")
 
