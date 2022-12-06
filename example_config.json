@@ -1,0 +1,21 @@
+{
+  "email": {
+    "from": {
+      "address": "your_email_address@outlook.com",
+      "password": "your_email_password",
+      "smtp": "smtp.office365.com"
+    },
+    "to": "your_email_address_2@outlook.com"
+  },
+  "ticket": {
+    "from": "ZHO",
+    "to": "HKG"
+  },
+  "passengers": [
+    {
+      "name": "大鸡巴",
+      "idcard": "110101197001014914",
+      "active": true
+    }
+  ]
+}

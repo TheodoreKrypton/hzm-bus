@@ -1,351 +1,344 @@
+import json
 import smtplib
+import urllib.parse
+import requests
+from selenium import webdriver
 from email.mime.text import MIMEText
 from email.header import Header
-import uuid
-import json
-import datetime
-import requests
-import logging
-import ddddocr
+from functools import lru_cache
 import pymysql
-from selenium import webdriver
-import random
+import logging
+from dataclasses import dataclass
+import datetime
+import ddddocr
+from typing import Optional
+import sys
 import time
-import cv2
+
+
+@dataclass
+class Account:
+    username: str
+    password: str
+
+
+@dataclass
+class Passenger:
+    name: str
+    idcard: str
+
 
 config = json.load(open('config.json', 'r', encoding='utf-8'))
-ticket = config['ticket']
+from_station = config["ticket"]["from"]
+to_station = config["ticket"]["to"]
+session = requests.session()
+current_account = None  # type: Optional[Account]
+base_url = 'http://i.hzmbus.com/webh5api'
+HEADERS = {
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+    'Connection': 'keep-alive',
+    'Content-Type': 'application/json;charset=UTF-8',
+    'Host': 'i.hzmbus.com',
+    'Origin': 'https://i.hzmbus.com',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
+    'sec-ch-ua': '"Not?A_Brand";v="8", "Chromium";v="108", "Google Chrome";v="108"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+}
+ocr = ddddocr.DdddOcr()
 
 
-class BuyTicket:
-    def __init__(self):
-        self.person_info = None
-        self.tickets_log = None
-        self.tickets = None
-        self.account_info = None
-        self.cookies = ''
-        self.global_uuid = uuid.uuid4()
-        # Selenium setting begin
-        self.options = webdriver.ChromeOptions()
-        self.options.add_experimental_option('excludeSwitches', ['enable-automation'])
-        self.options.add_experimental_option('useAutomationExtension', False)
-        self.options.add_argument('--headless')
-        self.options.add_argument('--no-sandbox')
-        self.options.add_argument('--disable-gpu')
-        self.options.add_argument('--disable-dev-shm-usage')
-        # Selenium Setting end
-        self.max = random.randint(2, 4)
-        self.session = requests.session()
-        self.login_url = 'http://i.hzmbus.com/webh5api/login'  # 登录地址
-        self.query_ticket_url = 'http://i.hzmbus.com/webh5api/manage/query.book.info.data'  # 车票查询地址
-        # Email Setting begin
-        self.from_addr = config["email"]["from"]["address"]
-        self.password = config["email"]["from"]["password"]
-        self.to_addr = config["email"]["to"]
-        self.smtp_server = config["email"]["from"]["smtp"]
-        # EMail Setting end
-        # DB Setting begin
-        self.db = pymysql.connect(**config["mysql"])
-        self.cursor = self.db.cursor()
-        # DB Setting end
-        self.mac = uuid.UUID(int=uuid.getnode()).hex[-12:]
-        self.headers = {
-            'Host': 'i.hzmbus.com',
-            'Connection': 'keep-alive',
-            'Content-Length': '148',
-            'sec-ch-ua': '"Chromium";v="104", " Not A;Brand";v="99", "Google Chrome";v="104"',
-            'Accept': 'application/json, text/plain, */*',
-            'Content-Type': 'application/json;charset=UTF-8',
-            'sec-ch-ua-mobile': '?0',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36',
-            'sec-ch-ua-platform': '"Windows"',
-            'ec-Fetch-Sit': 'same-origin',
-            'ec-Fetch-Mod': 'cors',
-            'ec-Fetch-Des': 'empty',
-            'Accept - Encoding': 'gzip, deflate, br',
-            'Accept-Language': 'zh-CN,zh;q=0.9'
-        }
-        self.get_cookies()
+@lru_cache(1)
+def db():
+    _db = pymysql.connect(**config["mysql"])
+    return _db.cursor()
 
-    def get_cookies(self):
-        """
-        获取cookies， 此处使用了selenium
-        :return:
-        """
-        print('Get cookies')
-        driver = webdriver.Chrome(options=self.options)
 
-        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument',
-                               {'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'})
-        self.cookies = ''
-        driver.get(self.login_url)
+def query(sql):
+    db().execute(sql)
+    return db().fetchall()
+
+
+def get_accounts():
+    global current_account
+
+    with open("accounts.txt", encoding='utf-8') as fp:
+        all_accounts = [line.split() for line in fp.read().split('\n')]
+    i = 0
+    while True:
+        i %= len(all_accounts)
+        username, password, active = all_accounts[i]
+        i += 1
+        if bool(int(active)):
+            current_account = Account(username=username, password=password)
+            yield current_account
+
+
+accounts = get_accounts()
+
+
+@lru_cache(1)
+def get_passengers():
+    return [Passenger(name=psg["name"], idcard=psg["idcard"]) for psg in config["passengers"]]
+
+
+def with_base_body(addition):
+    base_body = {
+        "appId": "HZMBWEB_HK",
+        "joinType": "WEB",
+        "version": "2.7.202207.1213",
+        "equipment": "PC"
+    }
+    base_body.update(addition)
+    return base_body
+
+
+def initialize_logger():
+    logging.basicConfig(
+        filename='hzmbus.log',
+        encoding='utf-8',
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - [line:%(lineno)d] - %(message)s',
+    )
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+
+
+def send_email():
+    msg = MIMEText(f'请尽快上号支付 {current_account.username}', 'plain', 'utf-8')
+    msg['From'] = Header(config["email"]["from"]["address"])
+    msg['To'] = Header(config["email"]["to"])
+    subject = '中了'
+    msg['Subject'] = Header(subject, 'utf-8')
+    try:
+        mailserver = smtplib.SMTP(config["email"]["from"]["smtp"], 587)
+        mailserver.ehlo()
+        mailserver.starttls()
+        mailserver.login(config["email"]["from"]["address"], config["email"]["from"]["password"])
+        mailserver.sendmail(config["email"]["from"]["address"], config["email"]["to"], msg.as_string())
+    finally:
+        try:
+            mailserver.quit()
+        except Exception:
+            pass
+
+
+code = {
+    "HKG": "香港",
+    "ZHO": "珠海"
+}
+
+
+@lru_cache(0)
+def get_referrer():
+    params = urllib.parse.urlencode({
+        "xlmc_1": from_station,
+        "xlmc_2": to_station,
+        "xllb": 1,
+        "xldm": f"{from_station}{to_station}",
+        "code_1": from_station,
+        "code_2": to_station
+    })
+    return f"https://i.hzmbus.com/webhtml/ticket_details?{params}"
+
+
+def set_cookies():
+    options = webdriver.ChromeOptions()
+    options.add_experimental_option('excludeSwitches', ['enable-automation'])
+    options.add_experimental_option('useAutomationExtension', False)
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--disable-dev-shm-usage')
+    driver = webdriver.Chrome(options=options)
+    driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument',
+                           {'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'})
+    driver.get(f"{base_url}/login")
+
+    while True:
         cookies = driver.get_cookies()
-        if 'PHPSESSID' not in str(cookies):
-            self.get_cookies()
-        for cookie in cookies:
-            name = cookie['name']
-            value = cookie['value']
-            self.cookies += f'{name}={value};'
-        self.headers['Cookie'] = self.cookies
-        driver.close()
+        if 'PHPSESSID' in str(cookies):
+            cookies = ';'.join((f"{cookie['name']}={cookie['value']}" for cookie in cookies))
+            HEADERS['Cookie'] = cookies
+            break
+    driver.close()
 
-    def email(self):
-        """
-        Email
-        :return:
-        """
-        msg = MIMEText('请尽快上号支付' + str(self.account_info), 'plain', 'utf-8')
-        msg['From'] = Header('test')
-        msg['To'] = Header('HZM-BUS')
-        subject = '中了'
-        msg['Subject'] = Header(subject, 'utf-8')
+
+def switch_account():
+    logging.info("switching account")
+    account = next(accounts)
+    user = with_base_body({
+        "webUserid": account.username,
+        "passWord": account.password,
+        "code": ""
+    })
+
+    while True:
         try:
-            smtpobj = smtplib.SMTP_SSL(self.smtp_server)
-            smtpobj.connect(self.smtp_server, 465)
-            smtpobj.login(self.from_addr, self.password)
-            smtpobj.sendmail(self.from_addr, self.to_addr, msg.as_string())
-            print("吱！汇报进度" + str(self.account_info))
-        except smtplib.SMTPException:
-            print("无法发送邮件")
-        finally:
-            smtpobj.quit()
+            rsp = session.post(url=f"{base_url}/login", data=json.dumps(user), headers=HEADERS, verify=False)
+            data = rsp.json()
+            if data['code'] == 'SUCCESS':
+                logging.info('登录成功 ' + str(current_account.username))
+                HEADERS['Authorization'] = data["jwt"]
+                return
+        except Exception as ex:
+            logging.error(ex)
 
-    def save_log(self, log_level, log_info):
-        if log_level == 'error':
-            logging.error(log_info)
-        elif log_level == 'info':
-            logging.error(log_info)
-        else:
-            logging.error(log_info)
-        log_sql = f"insert into hzmbus_t_log(account_username, account_password, log_level, log_info, tickets, ident) values ('{self.account_info[0]}', '{self.account_info[1]}', '{log_level}', '{log_info}', '{self.tickets_log}', '{self.mac + '_' + str(self.global_uuid)}')"
-        self.cursor.execute(log_sql)
-        self.cursor.execute('commit')
 
-    def db_query(self, sql):
-        self.cursor.execute(sql)
-        return self.cursor.fetchall()
-
-    def get_ticket_info(self, cdate):
-        """
-        票务查询
-        :param cdate: 购票日期
-        :return:
-        """
-        while True:
-            try:
-                max_people_data = {"bookDate": str(cdate), "lineCode": f"{ticket['from']}{ticket['to']}",
-                                   "appId": "HZMBWEB_HK", "joinType": "WEB",
-                                   "version": "2.7.202207.1213", "equipment": "PC"}
-                book_info = self.session.post(self.query_ticket_url,
-                                              data=json.dumps(max_people_data),
-                                              headers=self.headers)
-                if book_info.json()['code'] != 'SUCCESS':
-                    logging.error(book_info.json()['message'])
-                    self.login()
-                    return
-                return book_info.json()['responseData']
-            except Exception as error:
-                self.get_cookies()
-                self.login()
-                logging.error('访问异常')
-                continue
-
-    def get_date_domain(self):
-        """
-        获取购票时间区间
-        可选
-        any: 任意可购票时间
-        具体日期列表， 例: ['2022-01-01'. '2022-01-02']
-        :return:
-        """
-        if self.tickets[0][3] != 'any':
-            return str(self.tickets[0][3]).split(',')
-        begin_date = datetime.datetime.now().date()
-        while True:
-            end_date = self.get_ticket_info(begin_date)
-            if not end_date:
-                self.login()
-            else:
-                end_date = end_date[0]['maxBookDate']
-                break
-        date_domain = []
-        while True:
-            try:
-                date_domain.append(begin_date.__str__())
-                begin_date += datetime.timedelta(days=1)
-                if str(begin_date) == end_date:
-                    date_domain.append(end_date)
-                    break
-            except:
-                continue
-        return date_domain
-
-    def ticket_query(self, date_domain):
-        """
-        票务查询--购票
-        :param date_domain: 购票区间日期
-        :return:
-        """
-        for buy_date in date_domain:
-            logging.info(f'当前查询日期[{buy_date}]')
-            get_book_info = self.get_ticket_info(buy_date)
-            if not get_book_info:
-                logging.warning('开始切换账号')
-                self.login()
-                continue
-            max_people = 0
-            for item in get_book_info:
-                try:
-                    max_people += int(item["maxPeople"])
-                    log = f'时间: {buy_date + " " + item["beginTime"]}, 票数: {max_people}, 状态: {"不能购买" if max_people > self.max else "正在购买"}'
-                    if max_people > self.max:
-                        # self.save_log('info', log)
-                        self.buy_ticket(buy_date, item["beginTime"])
-                except:
-                    logging.error('当日无车票信息')
-            log = f'时间: {buy_date}, 票数: {max_people}, 状态: {"不能购买" if max_people == 0 else "可以购买"}'
-            self.save_log('info', log)
-
-    def buy_ticket(self, begin_date, begin_time):
-        """
-        购票
-        :param begin_date: 开始日期
-        :param begin_time: 开始时间
-        :return:
-        """
-        buy_url = 'http://i.hzmbus.com/webh5api/captcha?1'
-        headers = {
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
-            'Cache-Control': 'max-age=0',
-            'Connection': 'keep-alive',
-            'DNT': '1',
-            'Host': 'i.hzmbus.com',
-            'Cookie': self.cookies,
-            'If-None-Match': 'W/"62f25921-937"',
-            'sec-ch-ua': '".Not/A)Brand";v="99", "Google Chrome";v="103", "Chromium";v="103"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'same-origin',
-            'Sec-Fetch-User': '?1',
-            'Upgrade-Insecure-Requests': '1',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
-                          'Chrome/103.0.0.0 Safari/537.36'}
-        while True:
-            a = self.session.get(buy_url, headers=headers)
-            ocr = ddddocr.DdddOcr()
-            code = ocr.classification(a.content)
-            with open('captcha.jpg', 'wb') as f:
-                f.write(a.content)
-                print(code)
-                cv2.imshow('captcha', cv2.imread('captcha.jpg'))
-            try:
-                if len(code) != 4:
-                    continue
-                int(code)
-                break
-            except:
-                continue
-        logging.info(code)
-        buy_data = {"ticketData": begin_date, "lineCode": f'{ticket["from"]}{ticket["to"]}', "startStationCode": ticket["from"],
-                    "endStationCode": ticket["to"],
-                    "boardingPointCode": f"{ticket['from']}01", "breakoutPointCode": f"{ticket['to']}01", "currency": "2", "ticketCategory": "1",
-                    "tickets": self.person_info,
-                    "amount": 6500 * len(self.person_info), "feeType": 9, "totalVoucherpay": 0, "voucherNum": 0,
-                    "voucherStr": "", "totalBalpay": 0,
-                    "totalNeedpay": 6500 * len(self.person_info), "bookBeginTime": begin_time,
-                    "bookEndTime": begin_time,
-                    "captcha": code,
-                    "sessionId": "", "sig": "", "token": "",
-                    "timestamp": int(time.time()), "appId": "HZMBWEB_HK",
-                    "joinType": "WEB", "version": "2.7.2032.1262", "equipment": "PC"}
-        headers = {'Accept': 'application/json, text/plain, */*',
-                   'Accept-Encoding': 'gzip, deflate, br',
-                   'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
-                   'Connection': 'keep-alive',
-                   'Content-Length': '591',
-                   'Content-Type': 'application/json;charset=UTF-8',
-                   'DNT': '1',
-                   'Cookie': self.cookies,
-                   'Host': 'i.hzmbus.com',
-                   'Origin': 'https://i.hzmbus.com',
-                   'Referer': 'https://i.hzmbus.com/webhtml/ticket_details?xlmc_1=%E9%A6%99%E6%B8%AF&xlmc_2=%E7%8F%A0%E6%B5%B7&xllb=1&xldm=HKGZHO&code_1=HKG&code_2=ZHO',
-                   'Sec-Fetch-Dest': 'empty',
-                   'Sec-Fetch-Mode': 'cors',
-                   'Sec-Fetch-Site': 'same-origin',
-                   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36',
-                   'sec-ch-ua': '".Not/A)Brand";v="99", "Google Chrome";v="103", "Chromium";v="103"',
-                   'sec-ch-ua-mobile': '?0',
-                   'sec-ch-ua-platform': '"Windows"'}
-
-        buy_ticket = self.session.post('http://i.hzmbus.com/webh5api/ticket/buy.ticket', headers=headers,
-                                       data=json.dumps(buy_data))
-        self.save_log('info', str(buy_ticket.json()).replace("'", ""))
-        if buy_ticket.json()['code'] == 'SUCCESS':
-            self.email()
-            return self.run()
-        elif buy_ticket.json()['code'] == 'FAIL':
-            self.login()
-            return
-        else:
-            self.login()
-            return self.buy_ticket(begin_date, begin_time)
-
-    def login(self):
-        """
-        用户登录
-        :return:
-        """
+def get_ticket_info(date):
+    while True:
         try:
-            self.account_info = self.db_query(
-                'select username, password from hzmbus_t_buy_account where  accountlock = 0 order by rand() limit 1')[0]
-            user = {"webUserid": self.account_info[0],
-                    "passWord": self.account_info[1], "code": "", "appId": "HZMBWEB_HK",
-                    "joinType": "WEB", "version": "2.7.202207.1213", "equipment": "PC"}
-            string = json.dumps(user)
-            login_msg = self.session.post(url=self.login_url, data=string, headers=self.headers, verify=False)
-            # 以下代码为应对下次源站更新准备
-            # cookies = ''
-            # for cookie in login_msg.cookies.items():
-            #     for k, v in cookie:
-            #         cookies += f'{k}={v};'
-            # print(cookies)
-            if login_msg.json()['code'] != 'SUCCESS':
-                logging.info(login_msg.json()['msg'])
-                self.login()
-            logging.info('登录成功' + str(self.account_info))
+            body = with_base_body({
+                "bookDate": str(date),
+                "lineCode": f"{from_station}{to_station}"
+            })
+            book_info = session.post(f'{base_url}/manage/query.book.info.data', data=json.dumps(body), headers=HEADERS)
+            if book_info.json()['code'] != 'SUCCESS':
+                logging.error(book_info.json()['message'])
+                switch_account()
+                continue
+            return book_info.json()['responseData']
         except Exception as error:
-            logging.error(error)
-            self.login()
-
-    def run(self):
-        """
-        开始运行
-        :return:
-        """
-        self.tickets = self.db_query('select id, username, idcard, buy_date from hzmbus_v_ticket_wait')
-        tickets_id = [ticket[0] for ticket in self.tickets]
-        self.cursor.execute(
-            f'update hzmbus_t_ticket set is_run = 1 where id in ({str(tickets_id).replace("[", "").replace("]", "")})')
-        self.cursor.execute('commit')
-        self.tickets_log = [f'{ticket[1]}-{ticket[2]}' for ticket in self.tickets]
-        self.tickets_log = str(self.tickets_log).replace("['", "").replace("']", "").replace("'", "")
-        self.person_info = []
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - [line:%(lineno)d] - %(message)s - ' + str(self.tickets_log), )
-        self.login()
-        for ticket in self.tickets:
-            person = {"ticketType": "00", "idCard": ticket[2], "idType": 1, "userName": ticket[1], "telNum": ""}
-            self.person_info.append(person)
-        date_domain = self.get_date_domain()
-        while True:
-            self.ticket_query(date_domain)
+            logging.error(f'访问异常, {error}')
+            set_cookies()
+            switch_account()
+            continue
 
 
-if __name__ == '__main__':
-    BuyTicket().run()
+def get_date_range():
+    begin_date = datetime.datetime.now().date()
+    while True:
+        rsp = get_ticket_info(begin_date)
+        if not rsp:
+            switch_account()
+        else:
+            end_date = rsp[0]['maxBookDate']
+            break
+    date_range = []
+    while True:
+        date_range.append(str(begin_date))
+        begin_date += datetime.timedelta(days=1)
+        if str(begin_date) == end_date:
+            date_range.append(end_date)
+            break
+    return date_range
 
+
+@lru_cache(1)
+def get_passenger_info():
+    passengers = get_passengers()
+    if f"{config['ticket']['from']}{config['ticket']['to']}" == "HKGZHO":
+        return [{
+            "ticketType": "00",
+            "idCard": passenger.idcard,
+            "idType": 1,
+            "userName": passenger.name,
+            "telNum": ""
+        } for passenger in passengers]
+    return [{
+        "ticketType": "00",
+        "idCard": "",
+        "idType": 1,
+        "userName": "",
+        "telNum": ""
+    }] * len(passengers)
+
+
+def ticket_query(date_range):
+    for date in date_range:
+        logging.info(f'当前查询日期[{date}]')
+        get_book_info = get_ticket_info(date)
+        if not get_book_info:
+            switch_account()
+            continue
+        seats_available = 0
+        passengers = get_passengers()
+        for item in get_book_info:
+            try:
+                seats_available += int(item["maxPeople"])
+                if seats_available >= len(passengers):
+                    logging.info(f'时间: {date} {item["beginTime"]}, 票数: {seats_available}, '
+                                 f'状态: {"不能购买" if seats_available <= len(passengers) else "正在购买"}')
+                    return buy_ticket(date, item["beginTime"])
+            except:
+                logging.error('当日无车票信息')
+        logging.info(f'时间: {date}, 票数: {seats_available}, 状态: {"不能购买" if seats_available == 0 else "可以购买"}')
+
+
+def solve_captcha():
+    while True:
+        captcha = session.get(f"{base_url}/captcha?1", headers=HEADERS)
+        res = ocr.classification(captcha.content)
+        with open("captcha.jpg", "wb") as fp:
+            fp.write(captcha.content)
+        if len(res) != 4:
+            continue
+        try:
+            int(res)
+            return res
+        except ValueError:
+            continue
+
+
+def buy_ticket(date, _time):
+    passenger_info = get_passenger_info()
+    body = with_base_body({
+        "ticketData": date,
+        "lineCode": f'{from_station}{to_station}',
+        "startStationCode": from_station,
+        "endStationCode": to_station,
+        "boardingPointCode": f"{from_station}01",
+        "breakoutPointCode": f"{to_station}01",
+        "currency": "2",
+        "ticketCategory": "1",
+        "tickets": passenger_info,
+        "amount": 6500 * len(passenger_info),
+        "feeType": 9,
+        "totalVoucherpay": 0,
+        "voucherNum": 0,
+        "voucherStr": "",
+        "totalBalpay": 0,
+        "totalNeedpay": 6500 * len(passenger_info),
+        "bookBeginTime": _time,
+        "bookEndTime": _time,
+        "captcha": solve_captcha(),
+        "sessionId": "",
+        "sig": "",
+        "token": "",
+        "timestamp": int(time.time())
+    })
+    new_headers = HEADERS.copy()
+    new_headers['Referer'] = get_referrer()
+
+    while True:
+        rsp = session.post(f'{base_url}/ticket/buy.ticket', headers=HEADERS, data=json.dumps(body)).json()
+        logging.info(rsp)
+        if rsp['code'] == 'SUCCESS':
+            send_email()
+            logging.info(f"已成功购买 for account: {current_account.username}")
+            return True
+        elif rsp['code'] == 'FAIL':
+            if rsp['message'] == '您還有未支付的訂單,請先支付后再進行購票,謝謝!':
+                send_email()
+                return True
+            return False
+        else:
+            switch_account()
+
+
+def run():
+    initialize_logger()
+    set_cookies()
+    switch_account()
+    date_range = get_date_range()
+    while True:
+        if ticket_query(date_range):
+            break
+        switch_account()
+
+
+run()
