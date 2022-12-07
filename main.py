@@ -6,7 +6,6 @@ from selenium import webdriver
 from email.mime.text import MIMEText
 from email.header import Header
 from functools import lru_cache
-import pymysql
 import logging
 from dataclasses import dataclass
 import datetime
@@ -76,17 +75,6 @@ ocr = ddddocr.DdddOcr()
 
 def fmt_ex(ex):
     return f"{type(ex)}: {ex}"
-
-
-@lru_cache(1)
-def db():
-    _db = pymysql.connect(**config["mysql"])
-    return _db.cursor()
-
-
-def query(sql):
-    db().execute(sql)
-    return db().fetchall()
 
 
 def get_accounts():
