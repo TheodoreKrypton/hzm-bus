@@ -108,7 +108,6 @@ def with_base_body(addition):
 def initialize_logger():
     logging.basicConfig(
         filename='hzmbus.log',
-        encoding='utf-8',
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - [line:%(lineno)d] - %(message)s',
     )
@@ -153,7 +152,7 @@ def get_referrer():
     return f"https://i.hzmbus.com/webhtml/ticket_details?{params}"
 
 
-def get_cookies():
+def get_driver():
     options = webdriver.ChromeOptions()
     options.add_experimental_option('excludeSwitches', ['enable-automation'])
     options.add_experimental_option('useAutomationExtension', False)
@@ -164,6 +163,12 @@ def get_cookies():
     driver = webdriver.Chrome(options=options)
     driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument',
                            {'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'})
+    driver.get('chrome://settings/clearBrowserData')
+    return driver
+
+
+def get_cookies():
+    driver = get_driver()
     driver.get(f"{BASE_URL}/login")
 
     while True:
