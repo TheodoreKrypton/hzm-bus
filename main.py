@@ -13,6 +13,7 @@ import ddddocr
 import sys
 import time
 import threading
+import traceback
 
 
 @dataclass
@@ -71,6 +72,11 @@ BUS_SCHEDULES = {
 }
 
 ocr = ddddocr.DdddOcr()
+
+
+def error(ex):
+    print(traceback.format_tb(ex.__traceback__), file=sys.stderr)
+    logging.error(fmt_ex(ex))
 
 
 def fmt_ex(ex):
@@ -179,7 +185,7 @@ def get_cookies():
                 driver.close()
                 return cookies
         except Exception as ex:
-            logging.error(f"get_cookies error: {fmt_ex(ex)}")
+            error(ex)
 
 
 def login(session, headers, account):
@@ -197,7 +203,7 @@ def login(session, headers, account):
                 logging.info('登录成功 ' + account.username)
                 return data["jwt"]
         except Exception as ex:
-            logging.error(f"login error: {fmt_ex(ex)}")
+            error(ex)
 
 
 @lru_cache(1)
@@ -240,7 +246,7 @@ def solve_captcha(session, headers):
             except ValueError:
                 continue
         except Exception as ex:
-            logging.error(f"solve_captcha error: {fmt_ex(ex)}")
+            error(ex)
 
 
 def buy_ticket(session, account, headers, body):
@@ -260,7 +266,7 @@ def buy_ticket(session, account, headers, body):
                     return True
                 return False
         except Exception as ex:
-            logging.error(f"buy_ticket error: {fmt_ex(ex)}")
+            error(ex)
         retry += 1
         body["captcha"] = solve_captcha(session, headers)
 
@@ -318,6 +324,7 @@ class Worker(threading.Thread):
                     break
                 except Exception as ex:
                     logging.error(f"creating worker {account.username} for {' '.join(job)} error: {fmt_ex(ex)}")
+                    error(ex)
 
     @staticmethod
     def run_task(session, account, headers, body):
