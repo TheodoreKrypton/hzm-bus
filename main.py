@@ -75,7 +75,7 @@ ocr = ddddocr.DdddOcr()
 
 
 def error(ex):
-    logging.error(traceback.format_tb(ex.__traceback__))
+    logging.error(''.join(traceback.format_tb(ex.__traceback__)))
 
 
 def get_accounts():
