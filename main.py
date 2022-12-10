@@ -61,6 +61,8 @@ BUS_SCHEDULES = {
         "16:00:00",
         "17:00:00",
         "18:00:00",
+        "19:00:00",
+        "20:00:00"
     ],
     "ZHOHKG": [
         "11:00:00",
@@ -318,7 +320,7 @@ class Worker(threading.Thread):
                     self.threads.append(thread)
                     break
                 except Exception as ex:
-                    logging.error(f"creating worker {account.username} for {' '.join(job)} error: {fmt_ex(ex)}")
+                    logging.error(f"creating worker {account.username} for {' '.join(job)}")
                     error(ex)
 
     @staticmethod
