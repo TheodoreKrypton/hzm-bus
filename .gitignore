@@ -5,3 +5,7 @@ scratch
 accounts.txt
 *.log
 *.exe
+guiji.html
+credentials.json
+token.json
+/**/__pycache__/

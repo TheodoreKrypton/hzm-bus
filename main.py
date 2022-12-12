@@ -15,6 +15,8 @@ import time
 import threading
 import traceback
 
+from nocaptcha import captcha
+
 
 @dataclass
 class Account:
@@ -35,6 +37,8 @@ BEGIN_TIME = config["behaviour"]["begin_time"]
 TASKS_PER_ACCOUNT = config["behaviour"]["tasks_per_account"]
 MAX_RETRY = config["behaviour"]["max_retry"]
 BASE_URL = 'http://i.hzmbus.com/webh5api'
+CAPTCHA_APP_ID = 'FFFF0N0000000000A95D'
+CAPTCHA_SCENE = 'nc_other_h5'
 HEADERS = {
     'Accept': 'application/json, text/plain, */*',
     'Accept-Encoding': 'gzip, deflate, br',
@@ -65,8 +69,8 @@ BUS_SCHEDULES = {
         "20:00:00"
     ],
     "ZHOHKG": [
-        "11:00:00",
-        "13:00:00",
+        # "11:00:00",
+        # "13:00:00",
         "15:00:00",
         "16:00:00",
         "17:00:00",
@@ -230,7 +234,7 @@ def get_passenger_info():
     }] * len(passengers)
 
 
-def solve_captcha(session, headers):
+def solve_captcha_1(session, headers):
     while True:
         try:
             captcha = session.get(f"{BASE_URL}/captcha?1", headers=headers)
@@ -246,13 +250,28 @@ def solve_captcha(session, headers):
             error(ex)
 
 
+def solve_captcha_2():
+    while True:
+        try:
+            rsp = captcha(CAPTCHA_APP_ID, CAPTCHA_SCENE)
+            data = json.loads(rsp)
+            return {
+                "sig": data["sig"],
+                "token": data["token"],
+                "sessionId": data["sessionId"]
+            }
+        except Exception as ex:
+            error(ex)
+            continue
+
+
 def buy_ticket(session, account, headers, body):
     retry = 0
     while retry < MAX_RETRY:
         body["timestamp"] = int(time.time())
         try:
             rsp = session.post(f'{BASE_URL}/ticket/buy.ticket', headers=headers, data=json.dumps(body)).json()
-            logging.info(rsp)
+            logging.info(f"buying ticket for {account.username} captcha_type={1 if body['captcha'] else 2}: {rsp}")
             if rsp['code'] == 'SUCCESS':
                 send_email(account.username)
                 logging.info(f"已成功购买 for account: {account.username}")
@@ -265,17 +284,24 @@ def buy_ticket(session, account, headers, body):
         except Exception as ex:
             error(ex)
         retry += 1
-        body["captcha"] = solve_captcha(session, headers)
+        if body["captcha"]:
+            body["captcha"] = solve_captcha_1(session, headers)
+        else:
+            body.update(solve_captcha_2())
+        time.sleep(10)
 
 
 class Worker(threading.Thread):
     def __init__(self, account, jobs):
         super().__init__()
+        self.account = account
         self.jobs = jobs
+        self.threads = []
 
+    def prepare(self):
         def create_body(_session, _headers, date, _time):
             passenger_info = get_passenger_info()
-            return with_base_body({
+            base_body = with_base_body({
                 "ticketData": date,
                 "lineCode": f'{FROM_STATION}{TO_STATION}',
                 "startStationCode": FROM_STATION,
@@ -297,11 +323,17 @@ class Worker(threading.Thread):
                 "sessionId": "",
                 "sig": "",
                 "token": "",
-                "captcha": solve_captcha(_session, _headers)
+                "captcha": ""
             })
+            body1 = base_body.copy()
+            body1["captcha"] = solve_captcha_1(_session, _headers)
 
-        self.threads = []
-        for job in jobs:
+            body2 = base_body.copy()
+            body2.update(solve_captcha_2())
+
+            return body1, body2
+
+        for job in self.jobs:
             while True:
                 try:
                     session = requests.session()
@@ -309,18 +341,20 @@ class Worker(threading.Thread):
                     headers = HEADERS.copy()
                     headers['Cookie'] = get_cookies()
                     headers.update({
-                        'Authorization': login(session, headers, account),
+                        'Authorization': login(session, headers, self.account),
                         'Referer': get_referrer()
                     })
-                    thread = threading.Thread(
-                        target=self.run_task,
-                        args=(session, account, headers, create_body(session, headers, *job))
-                    )
-                    logging.info(f"worker {account.username} started for {' '.join(job)}")
-                    self.threads.append(thread)
+
+                    for body in create_body(session, headers, *job):
+                        thread = threading.Thread(
+                            target=self.run_task,
+                            args=(session, self.account, headers, body)
+                        )
+                        logging.info(f"worker {self.account.username} started for {' '.join(job)}")
+                        self.threads.append(thread)
                     break
                 except Exception as ex:
-                    logging.error(f"creating worker {account.username} for {' '.join(job)}")
+                    logging.error(f"error occurred when creating worker {self.account.username} for {' '.join(job)}")
                     error(ex)
 
     @staticmethod
@@ -331,6 +365,8 @@ class Worker(threading.Thread):
                 break
 
     def run(self) -> None:
+        self.prepare()
+
         for thread in self.threads:
             thread.start()
 
@@ -341,7 +377,7 @@ class Worker(threading.Thread):
 def run():
     initialize_logger()
     date_range = get_date_range()
-    # date_range = ["2022-12-08", "2022-12-07"]
+    date_range = ["2022-12-18", "2022-12-17"]
     route = f"{FROM_STATION}{TO_STATION}"
     schedules = BUS_SCHEDULES[route]
 
@@ -369,4 +405,5 @@ def run():
         thread.join()
 
 
-run()
+if __name__ == '__main__':
+    run()
