@@ -35,7 +35,6 @@ config = json.load(open('config.json', 'r', encoding='utf-8'))
 FROM_STATION = config["ticket"]["from"]
 TO_STATION = config["ticket"]["to"]
 BEGIN_TIME = config["behaviour"]["begin_time"]
-REUSE_INTERVAL = config["behaviour"]["reuse_interval"]
 BASE_URL = 'http://i.hzmbus.com/webh5api'
 CAPTCHA_APP_ID = 'FFFF0N0000000000A95D'
 CAPTCHA_SCENE = 'nc_other_h5'
@@ -279,7 +278,10 @@ class Worker:
             'Referer': get_referrer()
         })
 
+        self.next_available_t = 0
+
     def buy(self, date, slot, captcha_type):
+        self.next_available_t = time.time() + 10
         self.task = (date, slot, captcha_type)
 
         def create_body():
@@ -343,6 +345,8 @@ class Worker:
                     if rsp['message'] == '您還有未支付的訂單,請先支付后再進行購票,謝謝!':
                         send_email(self.account.username)
                         return self.complete()
+                elif rsp['code'] == '500' and rsp['message'] == '操作频繁,请稍后再试':
+                    self.next_available_t = time.time() + 60
 
                 self.send_back(*self.task)
             except Exception as ex:
@@ -388,12 +392,11 @@ def run():
                     workers[user_name][2] = False
                     new_task(*args)
                 return fn
-            workers[account.username] = [Worker(account, put_back(account.username), complete), 0, False]
+            workers[account.username] = Worker(account, put_back(account.username), complete)
 
-        worker, last_used, running = workers[account.username]
+        worker = workers[account.username]
         current_time = time.time()
-        if current_time >= last_used + REUSE_INTERVAL:
-            workers[account.username][1] = int(current_time)
+        if current_time >= worker.next_available_t:
             date, slot, captcha_type = q.get()
             worker.buy(date, slot, captcha_type)
 
