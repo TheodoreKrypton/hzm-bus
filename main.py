@@ -396,7 +396,7 @@ def run():
         if not running and current_time >= last_used + REUSE_INTERVAL:
             workers[account.username][2] = True
             workers[account.username][1] = int(current_time)
-            threading.Thread(target=worker.buy, args=(date, slot, captcha_type)).start()
+            worker.buy(date, slot, captcha_type)
 
         i_accounts += 1
         i_accounts %= len(accounts)
