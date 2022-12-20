@@ -396,10 +396,6 @@ def run():
             workers[account.username][1] = int(current_time)
             date, slot, captcha_type = q.get()
             worker.buy(date, slot, captcha_type)
-        else:
-            print(f"{account.username}: {current_time - last_used - REUSE_INTERVAL} seconds left until next reuse")
-
-        print(f"tasks in queue: {q.qsize()}")
 
         i_accounts += 1
         i_accounts %= len(accounts)
