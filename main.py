@@ -389,7 +389,7 @@ def run():
                     workers[user_name][2] = False
                     new_task(*args)
                 return fn
-            workers[account.username] = [Worker(account, put_back(account.username), complete), 0, True]
+            workers[account.username] = [Worker(account, put_back(account.username), complete), 0, False]
 
         worker, last_used, running = workers[account.username]
         current_time = time.time()
