@@ -389,7 +389,6 @@ def run():
         if account.username not in workers:
             def put_back(user_name):
                 def fn(*args):
-                    workers[user_name][2] = False
                     new_task(*args)
                 return fn
             workers[account.username] = Worker(account, put_back(account.username), complete)
