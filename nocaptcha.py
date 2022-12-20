@@ -2,7 +2,6 @@ from selenium.webdriver.common.action_chains import ActionChains
 import random
 import time
 import os
-from pyvirtualdisplay import Display
 from selenium import webdriver
 stealthminjs = None
 with open('stealth.min.js', 'r') as f:
@@ -47,6 +46,8 @@ GUIJIHTML = '''<!DOCTYPE html>
 
 try:
     if os.name == "posix":
+        from pyvirtualdisplay import Display
+
         display = Display(visible=0, size=(1024, 768))
         display.start()
     myRandomChromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36"

@@ -14,6 +14,7 @@ import sys
 import time
 import threading
 import traceback
+import queue
 
 from nocaptcha import captcha
 
@@ -34,8 +35,7 @@ config = json.load(open('config.json', 'r', encoding='utf-8'))
 FROM_STATION = config["ticket"]["from"]
 TO_STATION = config["ticket"]["to"]
 BEGIN_TIME = config["behaviour"]["begin_time"]
-TASKS_PER_ACCOUNT = config["behaviour"]["tasks_per_account"]
-MAX_RETRY = config["behaviour"]["max_retry"]
+REUSE_INTERVAL = config["behaviour"]["reuse_interval"]
 BASE_URL = 'http://i.hzmbus.com/webh5api'
 CAPTCHA_APP_ID = 'FFFF0N0000000000A95D'
 CAPTCHA_SCENE = 'nc_other_h5'
@@ -91,9 +91,6 @@ def get_accounts():
         username, password, active = account
         if bool(int(active)):
             yield Account(username=username, password=password)
-
-
-accounts = get_accounts()
 
 
 @lru_cache(1)
@@ -265,43 +262,29 @@ def solve_captcha_2():
             continue
 
 
-def buy_ticket(session, account, headers, body):
-    retry = 0
-    while retry < MAX_RETRY:
-        body["timestamp"] = int(time.time())
-        try:
-            rsp = session.post(f'{BASE_URL}/ticket/buy.ticket', headers=headers, data=json.dumps(body)).json()
-            logging.info(f"buying ticket for {account.username} captcha_type={1 if body['captcha'] else 2}: {rsp}")
-            if rsp['code'] == 'SUCCESS':
-                send_email(account.username)
-                logging.info(f"已成功购买 for account: {account.username}")
-                return True
-            elif rsp['code'] == 'FAIL':
-                if rsp['message'] == '您還有未支付的訂單,請先支付后再進行購票,謝謝!':
-                    send_email(account.username)
-                    return True
-                return False
-        except Exception as ex:
-            error(ex)
-        retry += 1
-        if body["captcha"]:
-            body["captcha"] = solve_captcha_1(session, headers)
-        else:
-            body.update(solve_captcha_2())
-        time.sleep(10)
-
-
-class Worker(threading.Thread):
-    def __init__(self, account, jobs):
+class Worker:
+    def __init__(self, account, send_back, complete):
         super().__init__()
         self.account = account
-        self.jobs = jobs
-        self.threads = []
+        self.send_back = send_back
+        self.task = None
+        self.complete = complete
 
-    def prepare(self):
-        def create_body(_session, _headers, date, _time):
+        self.session = requests.session()
+
+        self.headers = HEADERS.copy()
+        self.headers['Cookie'] = get_cookies()
+        self.headers.update({
+            'Authorization': login(self.session, self.headers, self.account),
+            'Referer': get_referrer()
+        })
+
+    def buy(self, date, slot, captcha_type):
+        self.task = (date, slot, captcha_type)
+
+        def create_body():
             passenger_info = get_passenger_info()
-            base_body = with_base_body({
+            body = with_base_body({
                 "ticketData": date,
                 "lineCode": f'{FROM_STATION}{TO_STATION}',
                 "startStationCode": FROM_STATION,
@@ -318,91 +301,99 @@ class Worker(threading.Thread):
                 "voucherStr": "",
                 "totalBalpay": 0,
                 "totalNeedpay": 6500 * len(passenger_info),
-                "bookBeginTime": _time,
-                "bookEndTime": _time,
+                "bookBeginTime": slot,
+                "bookEndTime": slot,
                 "sessionId": "",
                 "sig": "",
                 "token": "",
                 "captcha": ""
             })
-            body1 = base_body.copy()
-            body1["captcha"] = solve_captcha_1(_session, _headers)
+            if captcha_type == 1:
+                body["captcha"] = solve_captcha_1(self.session, self.headers)
+            elif captcha_type == 2:
+                body.update(solve_captcha_2())
+            return body
 
-            body2 = base_body.copy()
-            body2.update(solve_captcha_2())
-
-            return body1, body2
-
-        for job in self.jobs:
-            while True:
-                try:
-                    session = requests.session()
-
-                    headers = HEADERS.copy()
-                    headers['Cookie'] = get_cookies()
-                    headers.update({
-                        'Authorization': login(session, headers, self.account),
-                        'Referer': get_referrer()
-                    })
-
-                    for body in create_body(session, headers, *job):
-                        thread = threading.Thread(
-                            target=self.run_task,
-                            args=(session, self.account, headers, body)
-                        )
-                        logging.info(f"worker {self.account.username} started for {' '.join(job)}")
-                        self.threads.append(thread)
-                    break
-                except Exception as ex:
-                    logging.error(f"error occurred when creating worker {self.account.username} for {' '.join(job)}")
-                    error(ex)
-
-    @staticmethod
-    def run_task(session, account, headers, body):
         while True:
-            if BEGIN_TIME is None or time.time() > BEGIN_TIME:
-                buy_ticket(session, account, headers, body)
+            try:
+                t = threading.Thread(
+                    target=self.run_task,
+                    kwargs={"body": create_body()}
+                )
+                logging.info(f"worker {self.account.username} started for {date} {slot} captcha-{captcha_type}")
+                t.start()
                 break
+            except Exception as ex:
+                logging.error(f"error occurred when creating worker {self.account.username}"
+                              f" for {date} {slot} captcha-{captcha_type}")
+                error(ex)
 
-    def run(self) -> None:
-        self.prepare()
+    def run_task(self, body):
+        if BEGIN_TIME is None or time.time() > BEGIN_TIME:
+            body["timestamp"] = int(time.time())
+            try:
+                rsp = self.session.post(f'{BASE_URL}/ticket/buy.ticket', headers=self.headers, data=json.dumps(body)).json()
+                logging.info(
+                    f"buying ticket for {self.account.username} captcha_type={1 if body['captcha'] else 2}: {rsp}")
+                if rsp['code'] == 'SUCCESS':
+                    send_email(self.account.username)
+                    logging.info(f"已成功购买 for account: {self.account.username}")
+                    return self.complete()
+                elif rsp['code'] == 'FAIL':
+                    if rsp['message'] == '您還有未支付的訂單,請先支付后再進行購票,謝謝!':
+                        send_email(self.account.username)
+                        return self.complete()
 
-        for thread in self.threads:
-            thread.start()
-
-        for thread in self.threads:
-            thread.join()
+                self.send_back(*self.task)
+            except Exception as ex:
+                error(ex)
+                self.send_back(*self.task)
 
 
 def run():
     initialize_logger()
     date_range = get_date_range()
-    date_range = ["2022-12-18", "2022-12-17"]
+    # date_range = ["2022-12-18", "2022-12-17"]
     route = f"{FROM_STATION}{TO_STATION}"
     schedules = BUS_SCHEDULES[route]
 
-    buffer = []
-    threads = []
+    q = queue.Queue()
+    completed = False
 
-    try:
-        for date in date_range:
-            for slot in schedules:
-                buffer.append((date, slot))
-                if len(buffer) == TASKS_PER_ACCOUNT:
-                    account = next(accounts)
-                    threads.append(Worker(account, buffer))
-                    buffer = []
+    def new_task(*args):
+        logging.info(f"new task {args}")
+        q.put(args)
 
-        account = next(accounts)
-        threads.append(Worker(account, buffer))
-    except StopIteration:
-        pass
+    def complete():
+        nonlocal completed
+        completed = True
 
-    for thread in threads:
-        thread.start()
+    for date in date_range:
+        for slot in schedules:
+            for captcha_type in (1, 2):
+                new_task(date, slot, captcha_type)
 
-    for thread in threads:
-        thread.join()
+    workers = {}
+    accounts = list(get_accounts())
+    i_accounts = 0
+
+    while True:
+        if completed:
+            return
+        date, slot, captcha_type = q.get()
+
+        account = accounts[i_accounts]
+        if account.username not in workers:
+            workers[account.username] = [Worker(account, new_task, complete), 0]
+
+        worker, last_used = workers[account.username]
+        current_time = time.time()
+        if current_time >= last_used + REUSE_INTERVAL:
+            workers[account.username][1] = int(current_time)
+            worker.buy(date, slot, captcha_type)
+
+        i_accounts += 1
+        i_accounts %= len(accounts)
 
 
 if __name__ == '__main__':
