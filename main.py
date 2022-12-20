@@ -86,7 +86,7 @@ def error(ex):
 
 def get_accounts():
     with open("accounts.txt", encoding='utf-8') as fp:
-        all_accounts = [line.split() for line in fp.read().split('\n')]
+        all_accounts = [line.split() for line in fp.read().strip().split('\n')]
     for account in all_accounts:
         username, password, active = account
         if bool(int(active)):
