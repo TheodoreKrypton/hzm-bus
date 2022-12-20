@@ -370,7 +370,7 @@ def run():
 
     for date in date_range:
         for slot in schedules:
-            for captcha_type in (1, 2):
+            for captcha_type in (1,):
                 new_task(date, slot, captcha_type)
 
     workers = {}
@@ -393,10 +393,11 @@ def run():
 
         worker, last_used, running = workers[account.username]
         current_time = time.time()
-        if not running and current_time >= last_used + REUSE_INTERVAL:
-            workers[account.username][2] = True
+        if current_time >= last_used + REUSE_INTERVAL:
             workers[account.username][1] = int(current_time)
             worker.buy(date, slot, captcha_type)
+        else:
+            print(f"{account.username}: {current_time - last_used - REUSE_INTERVAL} seconds left until next reuse")
 
         i_accounts += 1
         i_accounts %= len(accounts)
