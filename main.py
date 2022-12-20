@@ -380,7 +380,6 @@ def run():
     while True:
         if completed:
             return
-        date, slot, captcha_type = q.get()
 
         account = accounts[i_accounts]
         if account.username not in workers:
@@ -395,6 +394,7 @@ def run():
         current_time = time.time()
         if current_time >= last_used + REUSE_INTERVAL:
             workers[account.username][1] = int(current_time)
+            date, slot, captcha_type = q.get()
             worker.buy(date, slot, captcha_type)
         else:
             print(f"{account.username}: {current_time - last_used - REUSE_INTERVAL} seconds left until next reuse")
