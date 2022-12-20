@@ -399,6 +399,8 @@ def run():
         else:
             print(f"{account.username}: {current_time - last_used - REUSE_INTERVAL} seconds left until next reuse")
 
+        print(f"tasks in queue: {q.qsize()}")
+
         i_accounts += 1
         i_accounts %= len(accounts)
 
