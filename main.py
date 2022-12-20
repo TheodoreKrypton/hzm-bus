@@ -384,13 +384,19 @@ def run():
 
         account = accounts[i_accounts]
         if account.username not in workers:
-            workers[account.username] = [Worker(account, new_task, complete), 0]
+            def put_back(user_name):
+                def fn(*args):
+                    workers[user_name][2] = False
+                    new_task(*args)
+                return fn
+            workers[account.username] = [Worker(account, put_back(account.username), complete), 0, True]
 
-        worker, last_used = workers[account.username]
+        worker, last_used, running = workers[account.username]
         current_time = time.time()
-        if current_time >= last_used + REUSE_INTERVAL:
+        if not running and current_time >= last_used + REUSE_INTERVAL:
+            workers[account.username][2] = True
             workers[account.username][1] = int(current_time)
-            worker.buy(date, slot, captcha_type)
+            threading.Thread(target=worker.buy, args=(date, slot, captcha_type))
 
         i_accounts += 1
         i_accounts %= len(accounts)
