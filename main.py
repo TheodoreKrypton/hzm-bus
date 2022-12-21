@@ -15,6 +15,7 @@ import time
 import threading
 import traceback
 import queue
+from PIL import UnidentifiedImageError
 
 from nocaptcha import captcha
 
@@ -242,6 +243,8 @@ def solve_captcha_1(session, headers):
                 return res
             except ValueError:
                 continue
+        except UnidentifiedImageError as ex:
+            raise ex
         except Exception as ex:
             error(ex)
 
@@ -397,7 +400,10 @@ def run():
         current_time = time.time()
         if current_time >= worker.next_available_t:
             date, slot, captcha_type = q.get()
-            worker.buy(date, slot, captcha_type)
+            try:
+                worker.buy(date, slot, captcha_type)
+            except UnidentifiedImageError:
+                del workers[account.username]
 
         i_accounts += 1
         i_accounts %= len(accounts)
