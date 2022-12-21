@@ -328,6 +328,7 @@ class Worker:
                 t.start()
                 break
             except UnidentifiedImageError as ex:
+                self.send_back(*self.task)
                 raise ex
             except Exception as ex:
                 logging.error(f"error occurred when creating worker {self.account.username}"
@@ -391,11 +392,11 @@ def run():
 
         account = accounts[i_accounts]
         if account.username not in workers:
-            def put_back(user_name):
+            def send_back(user_name):
                 def fn(*args):
                     new_task(*args)
                 return fn
-            workers[account.username] = Worker(account, put_back(account.username), complete)
+            workers[account.username] = Worker(account, send_back(account.username), complete)
 
         worker = workers[account.username]
         current_time = time.time()
