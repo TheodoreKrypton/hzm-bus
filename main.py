@@ -17,8 +17,7 @@ import traceback
 import queue
 from PIL import UnidentifiedImageError
 
-from nocaptcha import captcha
-
+import nocaptcha
 
 @dataclass
 class Account:
@@ -252,7 +251,7 @@ def solve_captcha_1(session, headers):
 def solve_captcha_2():
     while True:
         try:
-            rsp = captcha(CAPTCHA_APP_ID, CAPTCHA_SCENE)
+            rsp = nocaptcha.solve_captcha(CAPTCHA_APP_ID, CAPTCHA_SCENE)
             data = json.loads(rsp)
             return {
                 "sig": data["sig"],
@@ -328,6 +327,8 @@ class Worker:
                 logging.info(f"worker {self.account.username} started for {date} {slot} captcha-{captcha_type}")
                 t.start()
                 break
+            except UnidentifiedImageError as ex:
+                raise ex
             except Exception as ex:
                 logging.error(f"error occurred when creating worker {self.account.username}"
                               f" for {date} {slot} captcha-{captcha_type}")

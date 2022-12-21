@@ -63,7 +63,7 @@ try:
 except Exception as e:
     print("aliyun captcha loaded failed: " + str(e))
 
-def captcha(appid, scene):
+def solve_captcha(appid, scene):
     global GUIJIHTML
     s1 = time.time()
     MYHTMLFILE = GUIJIHTML.replace("MYAPPID", appid).replace("MYSCENE", scene)
